@@ -29,7 +29,7 @@ function connect() {
   socket.on('connect_error', e => { if (e.message === 'AUTH') { localStorage.removeItem('dw_token'); token = null; showLogin(); } });
   socket.on('config', c => { C = c; });
   socket.on('state', s => { const first = !S; S = s; $('#navAdmin').classList.toggle('hidden', !s.isAdmin); stateAt = Date.now(); skew = s.serverTime - Date.now(); $('#login').classList.add('hidden'); $('#game').classList.remove('hidden'); if (first || (tab !== 'chat' && tab !== 'admin')) render(); if (tab === 'admin') adminRefresh(); headerTick(); });
-  socket.on('world', w => { W = w; if (['map', 'rank'].includes(tab)) render(); });
+  socket.on('world', w => { W = w; if (tab === 'map' && mv.busy) { mv.pending = true; return; } if (['map', 'rank'].includes(tab)) render(); });
   socket.on('toast', t => toast(t));
   socket.on('report', r => { toast((r.win ? '🏆 ' : '💀 ') + r.title, !r.win); if (tab !== 'reports') $('#repDot').classList.remove('hidden'); });
   socket.on('chatHistory', h => { chat = h; if (tab === 'chat') render(); });
@@ -58,7 +58,7 @@ const resList = r => Object.entries(r || {}).filter(([, v]) => v > 0).map(([k, v
 
 // ---------- sekmeler ----------
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => { tab = b.dataset.tab; document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b)); if (tab === 'reports') $('#repDot').classList.add('hidden'); if (tab === 'chat') $('#chatDot').classList.add('hidden'); render(); $('#main').scrollTop = 0; });
-function render() { if (!S || !C) return; const m = $('#main'); const f = { base, army, heroes, map, reports, chat: chatTab, rank, admin: adminTab }[tab]; m.innerHTML = f(); bind[tab] && bind[tab](); headerTick(); }
+function render() { if (!S || !C) return; const m = $('#main'); const f = { base, army, heroes, map, reports, chat: chatTab, rank, admin: adminTab, inside }[tab]; m.innerHTML = f(); bind[tab] && bind[tab](); headerTick(); }
 const bind = {};
 
 function base() {
@@ -124,38 +124,108 @@ function heroes() {
 }
 bind.heroes = () => { $('#recruit').onclick = async () => { const r = await act('recruit'); if (r.ok && r.hero) modal(`<div class="reveal">${r.hero.icon}</div><h3 style="text-align:center">${esc(r.hero.name)}</h3><div style="text-align:center" class="small">${r.hero.rarity} · ${r.hero.role}${r.dup ? ' · tekrar (yıldız +1)' : ''}</div><br><button class="btn big" onclick="closeModal()">Harika!</button>`); }; };
 
+const TILE = 52; // harita karesi (px, zoom 1)
+const mv = { z: 1, x: 0, y: 0, init: false, busy: false, pending: false };
 function map() {
   if (!W) return '<div class="card">Harita yükleniyor…</div>';
   const pct = v => (v / W.mapSize * 100) + '%', ctr = v => ((v + .5) / W.mapSize * 100);
-  let h = '<h2>Kıyamet Haritası</h2><div class="mapwrap"><div class="mapgrid"></div><svg class="marches" viewBox="0 0 100 100" preserveAspectRatio="none">';
+  let h = `<div class="maphead"><h2>Kıyamet Haritası</h2><span class="small">İki parmakla yakınlaştır · sürükle</span></div><div class="mapview" id="mapview"><div class="mapinner" id="mapinner" style="width:${W.mapSize * TILE}px;height:${W.mapSize * TILE}px;transform:translate(${mv.x}px,${mv.y}px) scale(${mv.z})"><div class="mapgrid" style="background-size:${TILE}px ${TILE}px"></div><svg class="marches" viewBox="0 0 100 100" preserveAspectRatio="none">`;
   for (const m of W.marches) {
     const mine = m.ownerId === S.id, col = mine ? '#f0b347' : '#e74c3c';
     const [a, b, s, e] = m.phase === 'go' ? [m.from, m.to, m.startAt, m.arriveAt] : [m.to, m.from, m.arriveAt, m.returnAt];
-    h += `<line x1="${ctr(a.x)}" y1="${ctr(a.y)}" x2="${ctr(b.x)}" y2="${ctr(b.y)}" stroke="${col}" stroke-width=".5" stroke-dasharray="1.5 1" opacity=".8"/><circle r="1.2" fill="${col}" data-mv="${[ctr(a.x), ctr(a.y), ctr(b.x), ctr(b.y), s, e].join(',')}"/>`;
+    h += `<line x1="${ctr(a.x)}" y1="${ctr(a.y)}" x2="${ctr(b.x)}" y2="${ctr(b.y)}" stroke="${col}" stroke-width=".35" stroke-dasharray="1.2 .8" opacity=".85"/><circle r=".9" fill="${col}" data-mv="${[ctr(a.x), ctr(a.y), ctr(b.x), ctr(b.y), s, e].join(',')}"/>`;
   }
   h += '</svg>';
   for (const c of W.camps) h += `<div class="mobj ${selected && selected.type === 'camp' && selected.id === c.id ? 'sel' : ''}" style="left:${pct(c.x)};top:${pct(c.y)}" data-camp="${c.id}">${c.level >= 4 ? '👹' : '🧟'}<span class="tag">Sv.${c.level}</span></div>`;
-  for (const p of W.players) { if (!p.pos) continue; const me = p.id === S.id; h += `<div class="mobj base ${me ? '' : 'enemy'} ${selected && selected.type === 'player' && selected.id === p.id ? 'sel' : ''}" style="left:${pct(p.pos.x)};top:${pct(p.pos.y)}" data-pl="${p.id}">${me ? '🏰' : '🏯'}<span class="tag">${esc(p.name)}</span></div>`; }
-  h += '</div><div class="legend"><span>🏰 Üssün</span><span>🏯 Rakip</span><span>🧟 Zombi kampı</span><span>👹 Güçlü kamp</span><span style="color:#f0b347">— senin seferin</span><span style="color:#e74c3c">— rakip seferi</span></div>';
+  for (const p of W.players) { if (!p.pos) continue; const me = p.id === S.id; h += `<div class="mobj base ${me ? 'mine' : 'enemy'} ${selected && selected.type === 'player' && selected.id === p.id ? 'sel' : ''}" style="left:${pct(p.pos.x)};top:${pct(p.pos.y)}" data-pl="${p.id}">${me ? '🏰' : '🏯'}<span class="tag">${me ? '★ ' : ''}${esc(p.name)} · Sv.${p.hq}</span></div>`; }
+  h += `</div><div class="mapctl"><button id="mz_in" aria-label="Yakınlaştır">＋</button><button id="mz_out" aria-label="Uzaklaştır">－</button><button id="mz_home" aria-label="Üssüme git">🏰</button><button id="mz_fit" aria-label="Tüm harita">🗺️</button></div></div>`;
+  h += '<div class="legend"><span>🏰 Üssün (dokun: içeri gir)</span><span>🏯 Rakip</span><span>🧟 Zombi kampı</span><span>👹 Güçlü kamp</span><span style="color:#f0b347">— senin seferin</span><span style="color:#e74c3c">— rakip seferi</span></div>';
   h += '<div class="mapinfo" id="mapinfo">' + mapInfo() + '</div>';
   const mine = W.marches.filter(m => m.ownerId === S.id);
   if (mine.length) { h += '<h2>Seferlerim</h2>'; for (const m of mine) h += `<div class="card">${timerBlock(m.phase === 'go' ? m.startAt : m.arriveAt, m.phase === 'go' ? m.arriveAt : m.returnAt, (m.phase === 'go' ? '➡️ Hedefe: ' : '⬅️ Dönüş: ') + (m.target.type === 'camp' ? `Zombi Kampı Sv.${m.target.level}` : esc(m.target.name)))}</div>`; }
   return h;
+}
+function mapApply() { const i = $('#mapinner'); if (i) i.style.transform = `translate(${mv.x}px,${mv.y}px) scale(${mv.z})`; }
+function mapClamp() {
+  const v = $('#mapview'); if (!v || !W) return; const Vw = v.clientWidth, Vh = v.clientHeight, M = W.mapSize * TILE * mv.z, pad = 60;
+  mv.x = M <= Vw ? (Vw - M) / 2 : Math.min(pad, Math.max(Vw - M - pad, mv.x));
+  mv.y = M <= Vh ? (Vh - M) / 2 : Math.min(pad, Math.max(Vh - M - pad, mv.y));
+}
+function mapZoom(nz, px, py) { const v = $('#mapview'); if (!v) return; nz = Math.min(2.5, Math.max(0.3, nz)); if (px == null) { px = v.clientWidth / 2; py = v.clientHeight / 2; } mv.x = px - (px - mv.x) * nz / mv.z; mv.y = py - (py - mv.y) * nz / mv.z; mv.z = nz; mapClamp(); mapApply(); }
+function mapCenter(pos, z) { const v = $('#mapview'); if (!v || !pos) return; if (z) mv.z = z; mv.x = v.clientWidth / 2 - (pos.x + .5) * TILE * mv.z; mv.y = v.clientHeight / 2 - (pos.y + .5) * TILE * mv.z; mapClamp(); mapApply(); }
+function mapFit() { const v = $('#mapview'); if (!v) return; mv.z = Math.min(v.clientWidth, v.clientHeight) / (W.mapSize * TILE); mapClamp(); mapApply(); }
+function mapGestures() {
+  const v = $('#mapview'); if (!v) return; const pts = new Map(); let last = null, moved = 0, pinch = null;
+  const end = () => { if (!pts.size) { mv.busy = false; if (mv.pending) { mv.pending = false; setTimeout(() => { if (tab === 'map' && !mv.busy) render(); }, 50); } } };
+  v.addEventListener('pointerdown', e => { if (e.target.closest('.mapctl')) return; pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); mv.busy = true; if (pts.size === 1) { last = { x: e.clientX, y: e.clientY }; moved = 0; } else if (pts.size === 2) { const [a, b] = [...pts.values()]; pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), z: mv.z }; } });
+  v.addEventListener('pointermove', e => {
+    if (!pts.has(e.pointerId)) return; pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); const r = v.getBoundingClientRect();
+    if (pts.size >= 2 && pinch) { const [a, b] = [...pts.values()]; const d = Math.hypot(a.x - b.x, a.y - b.y); moved = 99; mapZoom(pinch.z * d / pinch.d, (a.x + b.x) / 2 - r.left, (a.y + b.y) / 2 - r.top); }
+    else if (pts.size === 1 && last) { const dx = e.clientX - last.x, dy = e.clientY - last.y; moved += Math.abs(dx) + Math.abs(dy); last = { x: e.clientX, y: e.clientY }; if (moved > 6) { mv.x += dx; mv.y += dy; mapClamp(); mapApply(); } }
+  });
+  const up = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch = null; if (pts.size === 1) { const [p] = [...pts.values()]; last = { ...p }; } end(); };
+  v.addEventListener('pointerup', up); v.addEventListener('pointercancel', up); v.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') up(e); });
+  v.addEventListener('click', e => { if (moved > 6) { e.stopPropagation(); e.preventDefault(); } }, true); // sürükleme dokunma sayılmasın
+  v.addEventListener('wheel', e => { e.preventDefault(); const r = v.getBoundingClientRect(); mapZoom(mv.z * (e.deltaY < 0 ? 1.15 : 1 / 1.15), e.clientX - r.left, e.clientY - r.top); }, { passive: false });
+  ['gesturestart', 'gesturechange'].forEach(t => v.addEventListener(t, e => e.preventDefault())); // iOS Safari sayfa zoom'unu engelle
+  $('#mz_in').onclick = () => mapZoom(mv.z * 1.3); $('#mz_out').onclick = () => mapZoom(mv.z / 1.3);
+  $('#mz_home').onclick = () => mapCenter(S.pos, Math.max(mv.z, 1)); $('#mz_fit').onclick = mapFit;
 }
 function mapInfo() {
   if (!selected) return '<div class="card small">Haritada bir zombi kampına veya rakip üsse dokunun.</div>';
   if (selected.type === 'camp') { const c = W.camps.find(x => x.id === selected.id); if (!c) { selected = null; return mapInfo(); }
     return `<div class="card"><div class="bhead"><div class="bicon">${c.level >= 4 ? '👹' : '🧟'}</div><div><div class="bname">Zombi Kampı · Sv.${c.level}</div><div class="small">Konum (${c.x},${c.y}) · ${unitList(c.units, C.ZOMBIES, ZICON)}</div><div class="small">Ganimet: ${resList(campLoot(c.level))}</div></div></div><button class="btn red big" style="margin-top:10px" id="atk">⚔️ Saldır</button></div>`; }
   const p = W.players.find(x => x.id === selected.id); if (!p) return '';
-  if (p.id === S.id) return `<div class="card"><div class="bname">🏰 ${esc(p.name)} (sen)</div><div class="small">Güç ⚡${fmt(p.power)} · Karargah Sv.${p.hq} · Duvar Sv.${p.wall}</div></div>`;
+  if (p.id === S.id) return `<div class="card"><div class="bname">🏰 ${esc(p.name)} (sen)</div><div class="small">Güç ⚡${fmt(p.power)} · Karargah Sv.${p.hq} · Duvar Sv.${p.wall}</div><button class="btn big" style="margin-top:10px" id="enter">🚪 Üsse Gir</button></div>`;
   const sh = p.shieldUntil - sNow();
   return `<div class="card"><div class="bhead"><div class="bicon">🏯</div><div><div class="bname">${esc(p.name)} ${p.online ? '<span class="pill good">çevrimiçi</span>' : '<span class="pill">çevrimdışı</span>'}</div><div class="small">Güç ⚡${fmt(p.power)} · Karargah Sv.${p.hq} · Duvar Sv.${p.wall}</div>${sh > 0 ? `<div class="pill warn">🛡️ Kalkan: <span data-end="${p.shieldUntil}" data-start="0"></span></div>` : ''}</div></div><button class="btn red big" style="margin-top:10px" id="atk" ${sh > 0 ? 'disabled' : ''}>⚔️ Üsse Saldır</button><div class="small" style="margin-top:6px">Not: Saldırırsan kendi kalkanın kalkar.</div></div>`;
 }
 function campLoot(l) { const m = Math.round(400 * l * Math.pow(1.4, l - 1)); return { food: m, wood: m, metal: Math.round(m * .7) }; }
 bind.map = () => {
+  if (!W) return;
+  if (!mv.init) { mv.init = true; mapCenter(S.pos || { x: 10, y: 10 }, 1); } else { mapClamp(); mapApply(); }
+  mapGestures();
   document.querySelectorAll('[data-camp]').forEach(e => e.onclick = () => { selected = { type: 'camp', id: +e.dataset.camp }; render(); });
-  document.querySelectorAll('[data-pl]').forEach(e => e.onclick = () => { selected = { type: 'player', id: e.dataset.pl }; render(); });
-  const a = $('#atk'); if (a) a.onclick = marchModal;
+  document.querySelectorAll('[data-pl]').forEach(e => e.onclick = () => { if (e.dataset.pl === S.id) return openInterior(); selected = { type: 'player', id: e.dataset.pl }; render(); });
+  const a = $('#atk'); if (a) a.onclick = marchModal; const en = $('#enter'); if (en) en.onclick = openInterior;
+};
+function openInterior() { tab = 'inside'; render(); $('#main').scrollTop = 0; }
+
+// ---------- Üs İçi ----------
+const BLAYOUT = [['hq'], ['farm', 'lumber', 'mine'], ['barracks', 'hospital'], ['wall']];
+function inside() {
+  const T = C.TROOPS;
+  let h = `<div class="inhead"><button class="btn sm" id="backmap">← Haritaya dön</button><b>🏰 ${esc(S.name)} Üssü</b><span class="small">⚡${fmt(S.power)}</span></div>`;
+  h += `<div class="introops">${C.TROOP_ORDER.map(t => `<div><span>${T[t].icon}</span><b>${fmt(S.troops[t])}</b><small>${T[t].name}</small></div>`).join('')}<div><span>🤕</span><b>${fmt(C.TROOP_ORDER.reduce((s, t) => s + S.wounded[t], 0))}</b><small>Yaralı</small></div><div><span>🦸</span><b>${S.heroes.length}</b><small>Kahraman</small></div></div>`;
+  const st = [];
+  if (S.train) st.push(timerBlock(S.train.startAt, S.train.endAt, `🪖 ${S.train.count} ${T[S.train.type].name} eğitimi`));
+  if (S.heal) st.push(timerBlock(S.heal.startAt, S.heal.endAt, '🏥 Tedavi'));
+  st.push(`<div class="row small"><span>🧟 Sıradaki dalga: <b data-end="${S.nextWaveAt}" data-start="${S.lastWaveAt}"></b></span><span>Korunan: ${fmt(S.protected)} · Depo: ${fmt(S.cap)}</span></div>`);
+  h += `<div class="card">${st.join('')}</div>`;
+  h += '<div class="yard">';
+  for (const row of BLAYOUT) {
+    h += `<div class="yrow n${row.length}">`;
+    for (const k of row) {
+      const B = C.BUILDINGS[k], n = S.next[k], L = S.b[k], busy = S.build && S.build.key === k;
+      let lock = ''; if (n) { if (k !== 'hq' && n.level > S.b.hq + 1) lock = `KG Sv.${n.level - 1} gerekli`; if (k === 'hq' && S.b.wall < n.level - 1) lock = `Duvar Sv.${n.level - 1} gerekli`; }
+      h += `<div class="ybld ${k} ${busy ? 'busy' : ''}"><div class="yicon">${B.icon}<span class="lvl">${L}</span></div><div class="yname">${B.name}</div>`;
+      if (busy) h += timerBlock(S.build.startAt, S.build.endAt, `→ Sv.${S.build.level}`) + '<button class="btn sm" data-speedup="1">⚡ Hızlandır</button>';
+      else if (!n) h += '<div class="pill good">Azami</div>';
+      else h += `<div>${costHtml(n.cost)}<button class="btn sm" data-up="${k}" data-needres="1" ${lock || S.build ? 'data-locked="1" disabled' : ''}>${lock ? '🔒 ' + lock : `⬆ Sv.${n.level} · ${dur(n.time)}`}</button></div>`;
+      h += '</div>';
+    }
+    h += '</div>';
+  }
+  h += '</div>';
+  h += `<div class="adrow"><button class="btn sm" data-goto="army">🪖 Ordu / Eğitim</button><button class="btn sm" data-goto="heroes">🦸 Kahramanlar</button><button class="btn sm red" id="inwave">🧟 Dalgayla savaş</button></div>`;
+  return h;
+}
+bind.inside = () => {
+  $('#backmap').onclick = () => { tab = 'map'; render(); };
+  document.querySelectorAll('[data-up]').forEach(b => b.onclick = () => act('upgrade', { key: b.dataset.up }));
+  document.querySelectorAll('[data-speedup]').forEach(b => b.onclick = () => act('speedup'));
+  document.querySelectorAll('[data-goto]').forEach(b => b.onclick = () => document.querySelector(`nav [data-tab=${b.dataset.goto}]`).click());
+  $('#inwave').onclick = () => act('wave');
 };
 setInterval(() => document.querySelectorAll('[data-mv]').forEach(c => { const [x1, y1, x2, y2, s, e] = c.dataset.mv.split(',').map(Number); const f = Math.min(1, Math.max(0, (sNow() - s) / (e - s))); c.setAttribute('cx', x1 + (x2 - x1) * f); c.setAttribute('cy', y1 + (y2 - y1) * f); }), 200);
 
