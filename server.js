@@ -11,7 +11,10 @@ const PORT = +process.env.PORT || 8090;
 const MAX_PLAYERS = +process.env.MAX_PLAYERS || 2;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
-const BASES = [{ x: 4, y: 4 }, { x: 15, y: 15 }];
+const BASES = [{ x: 4, y: 4 }, { x: 15, y: 15 }, { x: 15, y: 4 }, { x: 4, y: 15 }];
+const lc = s => String(s).trim().toLocaleLowerCase('tr');
+const ADMIN_NAMES = (process.env.ADMIN_NAME || 'Metin,Metin8434').split(',').map(lc).filter(Boolean); // virgülle birden fazla yönetici adı
+const isAdminName = n => ADMIN_NAMES.includes(lc(n));
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 let db = { players: [], camps: [], marches: [], chat: [], nextCampId: 1 };
@@ -21,7 +24,13 @@ function save() { if (!dirty) return; dirty = false; const tmp = DB_FILE + '.tmp
 setInterval(save, 3000);
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { dirty = true; save(); process.exit(0); });
 
+if (!db.adminLog) db.adminLog = [];
+if (!(db.speed > 0)) db.speed = 1;
+for (const p of db.players) p.isAdmin = isAdminName(p.name); // eski kayıtlarda da işaretle
 const byId = id => db.players.find(p => p.id === id);
+const regularCount = () => db.players.filter(p => !p.isAdmin).length;
+const SP = () => db.speed || 1; // küresel oyun hızı
+function freeBase() { return BASES.find(b => !db.players.some(p => p.pos && p.pos.x === b.x && p.pos.y === b.y)) || { x: 10, y: 10 }; }
 const now = () => Date.now();
 const clampLevel = l => Math.min(G.MAX_LEVEL, l);
 
@@ -42,7 +51,7 @@ function ensureCamps() { const alive = db.camps.filter(c => !c.respawnAt).length
 ensureCamps();
 
 // ---------- Oyuncu durumu ----------
-function rates(p) { return { food: G.prodPerHour(p.b.farm), wood: G.prodPerHour(p.b.lumber), metal: G.prodPerHour(p.b.mine) }; }
+function rates(p) { const k = SP(); return { food: G.prodPerHour(p.b.farm) * k, wood: G.prodPerHour(p.b.lumber) * k, metal: G.prodPerHour(p.b.mine) * k }; }
 function accrue(p, t) {
   const dt = (t - p.lastTick) / 3600000; if (dt <= 0) return;
   const r = rates(p), cap = G.storageCap(p.b.hq);
@@ -64,10 +73,10 @@ function report(p, r) { r.id = crypto.randomUUID(); r.at = now(); p.reports.unsh
 
 function selfView(p) {
   const t = now(); accrue(p, t);
-  const next = {}; for (const k of G.BUILD_ORDER) { const L = p.b[k] + 1; next[k] = L > G.MAX_LEVEL ? null : { level: L, cost: G.upgradeCost(k, L), time: G.upgradeTime(k, L) }; }
+  const next = {}; for (const k of G.BUILD_ORDER) { const L = p.b[k] + 1; next[k] = L > G.MAX_LEVEL ? null : { level: L, cost: G.upgradeCost(k, L), time: Math.max(1, Math.round(G.upgradeTime(k, L) / SP())) }; }
   const heroes = p.heroes.map(h => ({ ...h, ...G.heroStats(h), ...pick(G.HERO_POOL.find(x => x.key === h.key), ['name', 'role', 'rarity', 'icon']) }));
   return {
-    id: p.id, name: p.name, res: p.res, rates: rates(p), cap: G.storageCap(p.b.hq), protected: G.protectedAmount(p.b.hq),
+    id: p.id, name: p.name, isAdmin: !!p.isAdmin, speed: SP(), res: p.res, rates: rates(p), cap: G.storageCap(p.b.hq), protected: G.protectedAmount(p.b.hq),
     b: p.b, next, build: p.build, train: p.train, heal: p.heal, troops: p.troops, wounded: p.wounded, heroes,
     hospitalCap: G.hospitalCap(p.b.hospital), batch: G.batchSize(p.b.barracks), pos: p.pos, shieldUntil: p.shieldUntil,
     nextWaveAt: p.nextWaveAt, lastWaveAt: p.lastWaveAt || 0, stats: p.stats, power: G.power(p), reports: p.reports, serverTime: t,
@@ -77,7 +86,7 @@ function pick(o, ks) { const r = {}; for (const k of ks) r[k] = o[k]; return r; 
 function worldView() {
   return {
     serverTime: now(), mapSize: G.MAP_SIZE,
-    players: db.players.map(p => ({ id: p.id, name: p.name, pos: p.pos, hq: p.b.hq, wall: p.b.wall, power: G.power(p), shieldUntil: p.shieldUntil, stats: p.stats, online: socketsOf(p.id).length > 0 })),
+    speed: SP(), players: db.players.map(p => ({ id: p.id, name: p.name, isAdmin: !!p.isAdmin, pos: p.pos, hq: p.b.hq, wall: p.b.wall, power: G.power(p), shieldUntil: p.shieldUntil, stats: p.stats, online: socketsOf(p.id).length > 0 })),
     camps: db.camps.filter(c => !c.respawnAt).map(c => ({ id: c.id, x: c.x, y: c.y, level: c.level, units: c.units })),
     marches: db.marches.map(m => ({ id: m.id, ownerId: m.ownerId, from: m.from, to: m.to, phase: m.phase, startAt: m.startAt, arriveAt: m.arriveAt, returnAt: m.returnAt, target: m.target })),
   };
@@ -90,23 +99,24 @@ app.use(express.json({ limit: '10kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 const attempts = new Map();
 function limited(ip) { const t = now(); const a = (attempts.get(ip) || []).filter(x => t - x < 60000); a.push(t); attempts.set(ip, a); return a.length > 15; }
-app.get('/api/slots', (req, res) => res.json({ max: MAX_PLAYERS, used: db.players.length, names: db.players.map(p => p.name) }));
+app.get('/api/slots', (req, res) => res.json({ max: MAX_PLAYERS, used: regularCount(), names: db.players.filter(p => !p.isAdmin).map(p => p.name), adminFree: !db.players.some(p => p.isAdmin) }));
 app.post('/api/register', (req, res) => {
   if (limited(req.ip)) return res.status(429).json({ ok: false, msg: 'Çok fazla deneme, 1 dakika bekleyin.' });
   const name = String(req.body.name || '').trim(), pw = String(req.body.password || '');
   if (name.length < 2 || name.length > 16) return res.json({ ok: false, msg: 'İsim 2-16 karakter olmalı.' });
   if (pw.length < 4) return res.json({ ok: false, msg: 'Şifre en az 4 karakter olmalı.' });
-  if (db.players.length >= MAX_PLAYERS) return res.json({ ok: false, msg: 'Tüm oyuncu yerleri dolu (2/2). Giriş yapın.' });
-  if (db.players.some(p => p.name.toLocaleLowerCase('tr') === name.toLocaleLowerCase('tr'))) return res.json({ ok: false, msg: 'Bu isim alınmış.' });
-  const p = G.newPlayer(name, pw); if (process.env.NEWBIE_SHIELD === '0') p.shieldUntil = 0; p.pos = BASES[db.players.length]; const token = crypto.randomBytes(24).toString('hex'); p.tokens.push(token);
+  const admin = isAdminName(name);
+  if (db.players.some(p => lc(p.name) === lc(name))) return res.json({ ok: false, msg: admin ? 'Bu isim yöneticiye ayrılmış ve zaten kayıtlı. Giriş yapın.' : 'Bu isim alınmış.' });
+  if (!admin && regularCount() >= MAX_PLAYERS) return res.json({ ok: false, msg: `Tüm oyuncu yerleri dolu (${MAX_PLAYERS}/${MAX_PLAYERS}). Giriş yapın.` });
+  const p = G.newPlayer(name, pw); p.isAdmin = admin; if (process.env.NEWBIE_SHIELD === '0') p.shieldUntil = 0; p.pos = freeBase(); const token = crypto.randomBytes(24).toString('hex'); p.tokens.push(token);
   db.players.push(p); dirty = true; broadcastWorld();
-  chatSystem(`${name} kıyamet dünyasına katıldı!`);
+  chatSystem(admin ? `👑 Yönetici ${name} oyuna katıldı!` : `${name} kıyamet dünyasına katıldı!`);
   res.json({ ok: true, token });
 });
 app.post('/api/login', (req, res) => {
   if (limited(req.ip)) return res.status(429).json({ ok: false, msg: 'Çok fazla deneme, 1 dakika bekleyin.' });
   const name = String(req.body.name || '').trim(), pw = String(req.body.password || '');
-  const p = db.players.find(x => x.name.toLocaleLowerCase('tr') === name.toLocaleLowerCase('tr'));
+  const p = db.players.find(x => lc(x.name) === lc(name));
   if (!p || !G.checkPassword(p, pw)) return res.json({ ok: false, msg: 'İsim veya şifre hatalı.' });
   const token = crypto.randomBytes(24).toString('hex'); p.tokens.push(token); p.tokens = p.tokens.slice(-5); dirty = true;
   res.json({ ok: true, token });
@@ -140,7 +150,7 @@ io.on('connection', socket => {
     if (key !== 'hq' && L > p.b.hq + 1) return { ok: false, msg: `Önce Karargah'ı ${L - 1}. seviyeye yükseltin.` };
     if (key === 'hq' && p.b.wall < L - 1) return { ok: false, msg: `Karargah ${L} için Duvar en az ${L - 1}. seviye olmalı.` };
     const cost = G.upgradeCost(key, L); if (!canPay(p, cost)) return { ok: false, msg: 'Yetersiz kaynak.' };
-    pay(p, cost); p.build = { key, level: L, startAt: now(), endAt: now() + G.upgradeTime(key, L) * 1000 };
+    pay(p, cost); p.build = { key, level: L, startAt: now(), endAt: now() + Math.max(1, Math.round(G.upgradeTime(key, L) / SP())) * 1000 };
     return { ok: true, msg: `${B.name} ${L}. seviyeye yükseltiliyor.` };
   });
   act('speedup', (p) => { // ücretsiz hızlandırma: kalan süre < 60 sn
@@ -154,7 +164,7 @@ io.on('connection', socket => {
     if (p.b.barracks < T.unlock) return { ok: false, msg: `${T.name} için Kışla ${T.unlock}. seviye gerekli.` };
     if (count > G.batchSize(p.b.barracks)) return { ok: false, msg: `Tek seferde en fazla ${G.batchSize(p.b.barracks)} asker.` };
     const cost = {}; for (const r of G.RES) cost[r] = T.cost[r] * count; if (!canPay(p, cost)) return { ok: false, msg: 'Yetersiz kaynak.' };
-    pay(p, cost); const secs = Math.max(2, Math.round(count * T.time / (1 + 0.1 * (p.b.barracks - 1))));
+    pay(p, cost); const secs = Math.max(1, Math.round(Math.max(2, count * T.time / (1 + 0.1 * (p.b.barracks - 1))) / SP()));
     p.train = { type, count, startAt: now(), endAt: now() + secs * 1000 }; return { ok: true, msg: `${count} ${T.name} eğitiliyor.` };
   });
   act('heal', (p) => {
@@ -163,7 +173,7 @@ io.on('connection', socket => {
     const cost = { food: 0, wood: 0, metal: 0 }; for (const t of G.TROOP_ORDER) for (const r of G.RES) cost[r] += Math.round(G.TROOPS[t].cost[r] * units[t] * 0.25);
     if (!canPay(p, cost)) return { ok: false, msg: 'Tedavi için yetersiz kaynak.' };
     pay(p, cost); for (const t of G.TROOP_ORDER) p.wounded[t] = 0;
-    const secs = Math.max(3, Math.round(n * 0.6 / p.b.hospital)); p.heal = { units, startAt: now(), endAt: now() + secs * 1000 };
+    const secs = Math.max(1, Math.round(Math.max(3, n * 0.6 / p.b.hospital) / SP())); p.heal = { units, startAt: now(), endAt: now() + secs * 1000 };
     return { ok: true, msg: `${n} yaralı tedavi ediliyor.` };
   });
   act('recruit', (p) => {
@@ -191,7 +201,7 @@ io.on('connection', socket => {
       to = { ...d.pos }; tgt = { type: 'player', id: d.id, name: d.name }; p.shieldUntil = 0;
     } else return { ok: false, msg: 'Hedef seçin.' };
     for (const t of G.TROOP_ORDER) p.troops[t] -= send[t];
-    const dist = Math.hypot(to.x - p.pos.x, to.y - p.pos.y); const travel = Math.max(8, Math.round(dist * 2.5)) * 1000;
+    const dist = Math.hypot(to.x - p.pos.x, to.y - p.pos.y); const travel = Math.max(2000, Math.round(Math.max(8, Math.round(dist * 2.5)) * 1000 / SP()));
     db.marches.push({ id: crypto.randomUUID(), ownerId: p.id, from: { ...p.pos }, to, target: tgt, units: send, heroId: heroId || null, phase: 'go', startAt: now(), arriveAt: now() + travel, travel, returnAt: null, loot: null, survivors: null });
     return { ok: true, world: true, msg: `Sefer yola çıktı (${Math.round(travel / 1000)} sn).` };
   });
@@ -199,11 +209,109 @@ io.on('connection', socket => {
     if (now() - (p.lastWaveAt || 0) < 10 * 60000) return { ok: false, msg: 'Son dalgadan sonra 10 dakika beklemelisiniz.' };
     p.nextWaveAt = now(); return { ok: true, msg: 'Zombi dalgası geliyor!' };
   });
+  // ---------- Yönetici (her işlemde sunucu tarafı yetki kontrolü) ----------
+  socket.on('admin', (arg, ack) => {
+    const reply = typeof ack === 'function' ? ack : () => {};
+    const p = me();
+    if (!p || !p.isAdmin) { console.warn('Yetkisiz yönetici denemesi', p && p.name); return reply({ ok: false, msg: 'Yetkiniz yok.' }); }
+    let r; try { r = adminOp(p, arg || {}); } catch (e) { console.error(e); r = { ok: false, msg: 'Sunucu hatası' }; }
+    if (r.ok && r.log) { db.adminLog.unshift({ at: now(), by: p.name, text: r.log }); db.adminLog = db.adminLog.slice(0, 200); }
+    if (r.ok) { dirty = true; for (const q of db.players) pushState(q); broadcastWorld(); }
+    reply({ ok: r.ok, msg: r.msg, data: r.data });
+  });
   act('chat', (p, { text }) => {
     text = String(text || '').trim().slice(0, 300); if (!text) return { ok: false };
     const m = { id: crypto.randomUUID(), from: p.id, name: p.name, text, at: now() }; db.chat.push(m); db.chat = db.chat.slice(-200); io.emit('chat', m); return { ok: true };
   });
 });
+
+// ---------- Yönetici işlemleri ----------
+const int = (v, lo, hi) => { v = Math.floor(+v); if (!Number.isFinite(v)) return null; return Math.max(lo, Math.min(hi, v)); };
+function adminSummary() {
+  return { speed: SP(), log: db.adminLog.slice(0, 50), players: db.players.map(p => { accrue(p, now()); return { id: p.id, name: p.name, isAdmin: !!p.isAdmin, online: socketsOf(p.id).length > 0, res: Object.fromEntries(G.RES.map(r => [r, Math.floor(p.res[r])])), cap: G.storageCap(p.b.hq), troops: p.troops, wounded: p.wounded, b: p.b, build: p.build, train: p.train, heal: p.heal, pos: p.pos, shieldUntil: p.shieldUntil, nextWaveAt: p.nextWaveAt, power: G.power(p), heroes: p.heroes.length }; }) };
+}
+function finishAll(t, what) { // what: build/train/heal
+  const done = [];
+  if (what.build && t.build) { t.build.endAt = now(); done.push('inşaat'); }
+  if (what.train && t.train) { t.train.endAt = now(); done.push('eğitim'); }
+  if (what.heal && t.heal) { t.heal.endAt = now(); done.push('tedavi'); }
+  return done;
+}
+function adminOp(a, o) {
+  const op = String(o.op || '');
+  if (op === 'list') return { ok: true, data: adminSummary() };
+  if (op === 'broadcast') { const text = String(o.text || '').trim().slice(0, 300); if (!text) return { ok: false, msg: 'Mesaj boş.' }; chatSystem(`👑 Yönetici: ${text}`); return { ok: true, msg: 'Duyuru gönderildi.', log: `Duyuru: ${text}` }; }
+  if (op === 'speed') { const v = +o.value; if (![1, 2, 5, 10, 20, 50].includes(v)) return { ok: false, msg: 'Geçersiz hız.' }; for (const p of db.players) accrue(p, now()); db.speed = v; chatSystem(`⏩ Oyun hızı x${v} yapıldı.`); return { ok: true, msg: `Oyun hızı x${v}.`, log: `Oyun hızı x${v}` }; }
+  if (op === 'resetGame') {
+    if (o.confirm !== 'SIFIRLA') return { ok: false, msg: 'Onay için SIFIRLA yazın.' };
+    for (const p of db.players) { const n = G.newPlayer('x', 'xxxx'); Object.assign(p, pick(n, ['res', 'b', 'build', 'train', 'heal', 'troops', 'wounded', 'heroes', 'shieldUntil', 'nextWaveAt', 'stats', 'reports', 'lastTick'])); p.lastWaveAt = 0; }
+    if (o.deletePlayers) { for (const p of db.players.filter(x => !x.isAdmin)) for (const so of socketsOf(p.id)) so.disconnect(true); db.players = db.players.filter(x => x.isAdmin); }
+    db.marches = []; db.camps = []; db.chat = []; ensureCamps(); chatSystem('♻️ Oyun yönetici tarafından sıfırlandı.');
+    return { ok: true, msg: 'Oyun sıfırlandı.', log: 'Oyun sıfırlandı' + (o.deletePlayers ? ' (oyuncular silindi)' : '') };
+  }
+  if (op === 'finishMine' || op === 'finishAllPlayers') {
+    const list = op === 'finishMine' ? [a] : db.players; let n = 0; for (const t of list) n += finishAll(t, { build: true, train: true, heal: true }).length;
+    return { ok: true, msg: n ? `${n} işlem anında bitirildi.` : 'Bitirilecek işlem yok.', log: op === 'finishMine' ? 'Kendi işlemlerini bitirdi' : 'Tüm oyuncuların işlemlerini bitirdi' };
+  }
+  const t = byId(o.pid); if (!t) return { ok: false, msg: 'Oyuncu bulunamadı.' };
+  accrue(t, now());
+  switch (op) {
+    case 'res': {
+      const ch = {}; let any = false;
+      for (const r of G.RES) { const v = int((o.res || {})[r] || 0, -1e9, 1e9); if (v) { ch[r] = v; t.res[r] = Math.max(0, t.res[r] + v); any = true; } }
+      if (!any) return { ok: false, msg: 'Miktar girin.' };
+      const RN = { food: 'Yiyecek', wood: 'Odun', metal: 'Metal' }; const txt = Object.entries(ch).map(([k, v]) => `${RN[k]} ${v > 0 ? '+' : ''}${v}`).join(', ');
+      return { ok: true, msg: `${t.name}: ${txt}`, log: `${t.name} kaynak ${txt}` };
+    }
+    case 'produce': { // üretimi ileri sar
+      const h = int(o.hours, 1, 168); if (!h) return { ok: false, msg: 'Geçersiz süre.' };
+      const r = rates(t), g = {}; for (const k of G.RES) { g[k] = Math.round(r[k] * h); t.res[k] += g[k]; }
+      return { ok: true, msg: `${t.name}: ${h} saatlik üretim eklendi.`, log: `${t.name} +${h}sa üretim (${g.food}/${g.wood}/${g.metal})` };
+    }
+    case 'troops': {
+      const ch = {}; let any = false;
+      for (const k of G.TROOP_ORDER) { const v = int((o.troops || {})[k] || 0, -1e7, 1e7); if (v) { ch[k] = v; t.troops[k] = Math.max(0, t.troops[k] + v); any = true; } }
+      if (!any) return { ok: false, msg: 'Asker sayısı girin.' };
+      const txt = Object.entries(ch).map(([k, v]) => `${G.TROOPS[k].name} ${v > 0 ? '+' : ''}${v}`).join(', ');
+      return { ok: true, msg: `${t.name}: ${txt}`, log: `${t.name} asker ${txt}` };
+    }
+    case 'shield': {
+      const m = int(o.minutes, 0, 60 * 24 * 30); if (m === null) return { ok: false, msg: 'Geçersiz süre.' };
+      t.shieldUntil = m ? now() + m * 60000 : 0;
+      return { ok: true, msg: m ? `${t.name}: ${m} dk kalkan.` : `${t.name}: kalkan kaldırıldı.`, log: `${t.name} kalkan ${m ? m + ' dk' : 'kaldırıldı'}` };
+    }
+    case 'finish': {
+      const d = finishAll(t, { build: o.what !== 'train', train: o.what !== 'build', heal: !o.what });
+      return d.length ? { ok: true, msg: `${t.name}: ${d.join(', ')} anında bitirildi.`, log: `${t.name} anında bitir: ${d.join(', ')}` } : { ok: false, msg: 'Devam eden işlem yok.' };
+    }
+    case 'setLevel': {
+      if (!G.BUILDINGS[o.key]) return { ok: false, msg: 'Geçersiz bina.' };
+      const L = int(o.level, 1, G.MAX_LEVEL); if (!L) return { ok: false, msg: 'Geçersiz seviye.' };
+      t.b[o.key] = L; if (t.build && t.build.key === o.key) t.build = null;
+      return { ok: true, msg: `${t.name}: ${G.BUILDINGS[o.key].name} Sv.${L}`, log: `${t.name} ${G.BUILDINGS[o.key].name} Sv.${L}` };
+    }
+    case 'teleport': {
+      const x = int(o.x, 0, G.MAP_SIZE - 1), y = int(o.y, 0, G.MAP_SIZE - 1); if (x === null || y === null) return { ok: false, msg: 'Geçersiz konum.' };
+      if (db.players.some(p => p !== t && p.pos && Math.abs(p.pos.x - x) <= 1 && Math.abs(p.pos.y - y) <= 1)) return { ok: false, msg: 'Orası başka bir üsse çok yakın.' };
+      db.camps = db.camps.filter(c => !(Math.abs(c.x - x) <= 1 && Math.abs(c.y - y) <= 1)); t.pos = { x, y };
+      return { ok: true, msg: `${t.name} (${x},${y}) konumuna ışınlandı.`, log: `${t.name} ışınlandı (${x},${y})` };
+    }
+    case 'resetPlayer': {
+      const n = G.newPlayer('x', 'xxxx'); Object.assign(t, pick(n, ['res', 'b', 'build', 'train', 'heal', 'troops', 'wounded', 'heroes', 'shieldUntil', 'nextWaveAt', 'stats', 'reports', 'lastTick'])); t.lastWaveAt = 0;
+      db.marches = db.marches.filter(m => m.ownerId !== t.id);
+      return { ok: true, msg: `${t.name} sıfırlandı.`, log: `${t.name} sıfırlandı` };
+    }
+    case 'deletePlayer': {
+      if (t.isAdmin) return { ok: false, msg: 'Yönetici hesabı silinemez.' };
+      for (const so of socketsOf(t.id)) { so.emit('toast', 'Hesabınız yönetici tarafından silindi.'); so.disconnect(true); }
+      db.players = db.players.filter(p => p !== t); db.marches = db.marches.filter(m => m.ownerId !== t.id && !(m.target.type === 'player' && m.target.id === t.id));
+      chatSystem(`${t.name} oyundan çıkarıldı.`);
+      return { ok: true, msg: `${t.name} silindi.`, log: `${t.name} silindi` };
+    }
+    case 'wave': { t.nextWaveAt = now(); return { ok: true, msg: `${t.name} üssüne zombi dalgası gönderildi!`, log: `${t.name} zombi dalgası` }; }
+    default: return { ok: false, msg: 'Bilinmeyen işlem.' };
+  }
+}
 
 // ---------- Savaş çözümleri ----------
 function troopDefs() { return G.TROOPS; }
