@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d0f12">
+<title>Karanlık Savaş: Hayatta Kalma</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>☣️</text></svg>">
+</head>
+<body>
+<div id="login" class="screen">
+  <div class="login-bg"></div>
+  <div class="login-box">
+    <div class="logo">☣️</div>
+    <h1>KARANLIK SAVAŞ</h1>
+    <div class="sub">Hayatta Kalma · 2 Oyunculu</div>
+    <div class="slots" id="slots">…</div>
+    <div class="ltabs"><button id="tabLogin" class="on">Giriş</button><button id="tabReg">Kayıt Ol</button></div>
+    <input id="lname" placeholder="Komutan adı" maxlength="16" autocomplete="username">
+    <input id="lpass" type="password" placeholder="Şifre" autocomplete="current-password">
+    <button id="lgo" class="btn big">Giriş Yap</button>
+    <div id="lerr" class="err"></div>
+  </div>
+</div>
+
+<div id="game" class="screen hidden">
+  <header>
+    <div class="hrow">
+      <div class="who"><span class="avatar">🎖️</span><div><b id="pname"></b><div class="small"><span id="ppower"></span> · <span id="pshield"></span></div></div></div>
+      <button id="logout" class="ghost" title="Çıkış">⎋</button>
+    </div>
+    <div class="resbar">
+      <div class="res"><span>🌽</span><div><b id="r_food">0</b><small id="rr_food"></small></div></div>
+      <div class="res"><span>🪵</span><div><b id="r_wood">0</b><small id="rr_wood"></small></div></div>
+      <div class="res"><span>⚙️</span><div><b id="r_metal">0</b><small id="rr_metal"></small></div></div>
+    </div>
+  </header>
+  <main id="main"></main>
+  <nav id="nav">
+    <button data-tab="base" class="on"><span>🏚️</span>Üs</button>
+    <button data-tab="army"><span>🪖</span>Ordu</button>
+    <button data-tab="heroes"><span>🦸</span>Kahraman</button>
+    <button data-tab="map"><span>🗺️</span>Harita</button>
+    <button data-tab="reports"><span>📜</span>Rapor<i id="repDot" class="dot hidden"></i></button>
+    <button data-tab="chat"><span>💬</span>Sohbet<i id="chatDot" class="dot hidden"></i></button>
+    <button data-tab="rank"><span>🏆</span>Sıra</button>
+  </nav>
+</div>
+<div id="modal" class="modal hidden"><div class="mbox" id="mbox"></div></div>
+<div id="toasts"></div>
+<script src="/socket.io/socket.io.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
