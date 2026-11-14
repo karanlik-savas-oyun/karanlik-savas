@@ -13,7 +13,7 @@ const ui = { train: {}, };
 let regMode = false;
 function setMode(r) { regMode = r; $('#tabLogin').classList.toggle('on', !r); $('#tabReg').classList.toggle('on', r); $('#lgo').textContent = r ? 'Kayıt Ol ve Başla' : 'Giriş Yap'; $('#lpass').autocomplete = r ? 'new-password' : 'current-password'; }
 $('#tabLogin').onclick = () => setMode(false); $('#tabReg').onclick = () => setMode(true);
-async function loadSlots() { try { const r = await (await fetch('/api/slots')).json(); $('#slots').innerHTML = `Oyuncu yerleri: <b>${r.used}/${r.max}</b>${r.names.length ? ' · ' + r.names.map(esc).join(', ') : ''}`; if (r.used >= r.max) { setMode(false); $('#tabReg').disabled = true; $('#tabReg').style.opacity = .4; } else if (r.used === 0) setMode(true); } catch (e) { $('#slots').textContent = 'Sunucuya ulaşılamıyor'; } }
+async function loadSlots() { try { const r = await (await fetch('/api/slots')).json(); $('#slots').innerHTML = `Oyuncu yerleri: <b>${r.used}/${r.max}</b>${r.names.length ? ' · ' + r.names.map(esc).join(', ') : ''}`; if (r.used >= r.max && !r.adminFree) { setMode(false); $('#tabReg').disabled = true; $('#tabReg').style.opacity = .4; } else if (r.used === 0) setMode(true); } catch (e) { $('#slots').textContent = 'Sunucuya ulaşılamıyor'; } }
 $('#lgo').onclick = async () => {
   $('#lerr').textContent = '';
   const body = { name: $('#lname').value, password: $('#lpass').value };
@@ -28,7 +28,7 @@ function connect() {
   socket = io({ auth: { token } });
   socket.on('connect_error', e => { if (e.message === 'AUTH') { localStorage.removeItem('dw_token'); token = null; showLogin(); } });
   socket.on('config', c => { C = c; });
-  socket.on('state', s => { const first = !S; S = s; stateAt = Date.now(); skew = s.serverTime - Date.now(); $('#login').classList.add('hidden'); $('#game').classList.remove('hidden'); if (first || tab !== 'chat') render(); headerTick(); });
+  socket.on('state', s => { const first = !S; S = s; $('#navAdmin').classList.toggle('hidden', !s.isAdmin); stateAt = Date.now(); skew = s.serverTime - Date.now(); $('#login').classList.add('hidden'); $('#game').classList.remove('hidden'); if (first || (tab !== 'chat' && tab !== 'admin')) render(); if (tab === 'admin') adminRefresh(); headerTick(); });
   socket.on('world', w => { W = w; if (['map', 'rank'].includes(tab)) render(); });
   socket.on('toast', t => toast(t));
   socket.on('report', r => { toast((r.win ? '🏆 ' : '💀 ') + r.title, !r.win); if (tab !== 'reports') $('#repDot').classList.remove('hidden'); });
@@ -58,7 +58,7 @@ const resList = r => Object.entries(r || {}).filter(([, v]) => v > 0).map(([k, v
 
 // ---------- sekmeler ----------
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => { tab = b.dataset.tab; document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b)); if (tab === 'reports') $('#repDot').classList.add('hidden'); if (tab === 'chat') $('#chatDot').classList.add('hidden'); render(); $('#main').scrollTop = 0; });
-function render() { if (!S || !C) return; const m = $('#main'); const f = { base, army, heroes, map, reports, chat: chatTab, rank }[tab]; m.innerHTML = f(); bind[tab] && bind[tab](); headerTick(); }
+function render() { if (!S || !C) return; const m = $('#main'); const f = { base, army, heroes, map, reports, chat: chatTab, rank, admin: adminTab }[tab]; m.innerHTML = f(); bind[tab] && bind[tab](); headerTick(); }
 const bind = {};
 
 function base() {
@@ -211,6 +211,70 @@ function rank() {
   for (const p of ps) h += `<tr><td>${esc(p.name)}</td><td>${p.stats.pvpWin}/${p.stats.pvpLoss}</td><td>${p.stats.campWin}</td><td>${p.stats.waveWin}</td><td>${fmt(p.stats.kills)}</td></tr>`;
   return h + '</table></div>';
 }
+
+// ---------- Yönetici paneli (yetki sunucuda kontrol edilir) ----------
+let AD = null, adSel = null, adBusy = false, adTimer = 0;
+function adm(op, data) { return new Promise(res => socket.emit('admin', { op, ...(data || {}) }, r => { r = r || {}; if (r.msg) toast(r.msg, !r.ok); if (r.ok && op !== 'list') adminRefresh(true); res(r); })); }
+async function adminRefresh(force) { if (!S || !S.isAdmin || adBusy) return; if (!force && Date.now() - adTimer < 4000) return; adTimer = Date.now(); adBusy = true; const r = await adm('list'); adBusy = false; if (r.ok) { AD = r.data; const ae = document.activeElement; if (tab === 'admin' && !(force !== true && ae && $('#main').contains(ae) && /INPUT|SELECT|TEXTAREA/.test(ae.tagName))) { const keep = captureAdminInputs(); renderAdmin(); restoreAdminInputs(keep); } } }
+function captureAdminInputs() { const o = {}; document.querySelectorAll('#main input[id^=ad_], #main textarea[id^=ad_]').forEach(i => o[i.id] = i.value); return o; }
+function restoreAdminInputs(o) { for (const k in o) { const i = document.getElementById(k); if (i && i.type !== 'hidden') i.value = o[k]; } }
+function adminTab() { if (!AD) { setTimeout(() => adminRefresh(true), 0); return '<h2>👑 Yönetim</h2><div class="card">Yükleniyor…</div>'; } return adminHtml(); }
+function renderAdmin() { const m = $('#main'); m.innerHTML = adminHtml(); bind.admin(); headerTick(); }
+function adminHtml() {
+  if (!S.isAdmin) return '<div class="card">Yetkiniz yok.</div>';
+  const ps = AD.players; if (!adSel || !ps.find(p => p.id === adSel)) adSel = (ps.find(p => !p.isAdmin) || ps[0] || {}).id;
+  let h = '<h2>👑 Yönetici Paneli</h2>';
+  h += `<div class="card"><div class="bname">⏩ Oyun hızı: x${AD.speed}</div><div class="small">İnşaat, eğitim, tedavi, sefer ve üretim bu hızla çalışır.</div><div class="adrow">${[1, 2, 5, 10, 20, 50].map(v => `<button class="btn sm ${v === AD.speed ? 'grn' : ''}" data-speed="${v}">x${v}</button>`).join('')}</div>
+    <div class="adrow"><button class="btn sm" id="ad_fm">⚡ Benim işlerimi anında bitir</button><button class="btn sm" id="ad_fa">⚡ Herkesin işlerini bitir</button></div></div>`;
+  h += '<h2>Oyuncular</h2>';
+  for (const p of ps) {
+    const sh = p.shieldUntil - sNow();
+    h += `<div class="card adp ${p.id === adSel ? 'sel' : ''}" data-adsel="${p.id}"><div class="row"><b>${p.isAdmin ? '👑 ' : ''}${esc(p.name)} ${p.online ? '🟢' : '⚫'}</b><span class="small">⚡${fmt(p.power)} · KG ${p.b.hq}</span></div>
+      <div class="small">${RICON.food} ${fmt(p.res.food)} · ${RICON.wood} ${fmt(p.res.wood)} · ${RICON.metal} ${fmt(p.res.metal)} (depo ${fmt(p.cap)})</div>
+      <div class="small">🪖 ${p.troops.inf} · 🎯 ${p.troops.sniper} · 🚙 ${p.troops.tank} · yaralı ${p.wounded.inf + p.wounded.sniper + p.wounded.tank} · konum (${p.pos ? p.pos.x + ',' + p.pos.y : '-'}) · ${sh > 0 ? '🛡️ ' + dur(sh / 1000) : 'kalkan yok'}</div>
+      <div class="small">Binalar: ${C.BUILD_ORDER.map(k => C.BUILDINGS[k].icon + p.b[k]).join(' ')}${p.build ? ` · 🔨 ${C.BUILDINGS[p.build.key].name}→${p.build.level}` : ''}${p.train ? ` · 🪖 ${p.train.count} eğitimde` : ''}</div></div>`;
+  }
+  const t = ps.find(p => p.id === adSel);
+  if (t) {
+    h += `<h2>İşlem: ${esc(t.name)}</h2>`;
+    h += `<div class="card"><div class="bname">💰 Kaynak ver / al</div><div class="small">Eksi yazarsanız alır (ör. -500).</div><div class="adrow">${['food', 'wood', 'metal'].map(r => `<label>${RICON[r]}<input id="ad_r_${r}" type="number" inputmode="numeric" placeholder="0"></label>`).join('')}</div>
+      <div class="adrow"><button class="btn sm grn" id="ad_res">Uygula</button>${[1000, 10000, 100000].map(v => `<button class="btn sm" data-resall="${v}">Hepsine +${fmt(v)}</button>`).join('')}</div>
+      <div class="adrow"><span class="small">Üretimi ileri sar:</span>${[1, 8, 24].map(v => `<button class="btn sm" data-prod="${v}">+${v} saat</button>`).join('')}</div></div>`;
+    h += `<div class="card"><div class="bname">🪖 Asker ver / al</div><div class="adrow">${C.TROOP_ORDER.map(k => `<label>${C.TROOPS[k].icon}<input id="ad_t_${k}" type="number" inputmode="numeric" placeholder="0"></label>`).join('')}</div><button class="btn sm grn" id="ad_tr">Uygula</button></div>`;
+    h += `<div class="card"><div class="bname">⚡ Hızlandırma</div><div class="adrow"><button class="btn sm" data-fin="build">İnşaatı bitir</button><button class="btn sm" data-fin="train">Eğitimi bitir</button><button class="btn sm" data-fin="">Hepsini bitir</button></div></div>`;
+    h += `<div class="card"><div class="bname">🏗️ Bina seviyesi</div><div class="adrow"><select id="ad_bk">${C.BUILD_ORDER.map(k => `<option value="${k}">${C.BUILDINGS[k].icon} ${C.BUILDINGS[k].name} (Sv.${t.b[k]})</option>`).join('')}</select><input id="ad_bl" type="number" min="1" max="${C.MAX_LEVEL}" placeholder="Sv" style="width:80px"></div><div class="adrow"><button class="btn sm grn" id="ad_lvl">Seviyeyi ayarla</button><button class="btn sm" id="ad_maxall">Tüm binalar Sv.${C.MAX_LEVEL}</button></div></div>`;
+    h += `<div class="card"><div class="bname">🛡️ Kalkan · 🧭 Konum · 🧟 Dalga</div><div class="adrow">${[30, 240, 1440].map(m => `<button class="btn sm" data-sh="${m}">Kalkan ${m >= 60 ? m / 60 + ' sa' : m + ' dk'}</button>`).join('')}<button class="btn sm red" data-sh="0">Kalkanı kaldır</button></div>
+      <div class="adrow"><input id="ad_x" type="number" placeholder="X (0-19)"><input id="ad_y" type="number" placeholder="Y (0-19)"><button class="btn sm" id="ad_tp">Işınla</button></div>
+      <div class="adrow"><button class="btn sm red" id="ad_wave">🧟 Zombi dalgası gönder</button></div></div>`;
+    h += `<div class="card"><div class="bname">⚠️ Tehlikeli</div><div class="adrow"><button class="btn sm red" id="ad_rp">Oyuncuyu sıfırla</button>${t.isAdmin ? '' : '<button class="btn sm red" id="ad_del">Oyuncuyu sil</button>'}</div></div>`;
+  }
+  h += `<h2>📢 Duyuru</h2><div class="card"><div class="adrow"><input id="ad_msg" maxlength="300" placeholder="Herkese sistem mesajı"><button class="btn sm" id="ad_bc">Gönder</button></div></div>`;
+  h += `<h2>♻️ Oyunu sıfırla</h2><div class="card"><div class="small">Herkesin ilerlemesi baştan başlar. Kamplar, seferler ve sohbet temizlenir.</div><div class="adrow"><button class="btn sm red" id="ad_reset">Oyunu sıfırla</button><button class="btn sm red" id="ad_reset2">Sıfırla + oyuncuları sil</button></div></div>`;
+  h += `<h2>📋 Yönetici kayıtları</h2><div class="card small">${AD.log.length ? AD.log.map(l => `<div>${new Date(l.at).toLocaleString('tr-TR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} · ${esc(l.text)}</div>`).join('') : 'Henüz kayıt yok.'}</div>`;
+  return h;
+}
+bind.admin = () => {
+  if (!AD) return; const pid = adSel; const num = id => +(($('#' + id) || {}).value || 0);
+  document.querySelectorAll('[data-adsel]').forEach(e => e.onclick = () => { adSel = e.dataset.adsel; renderAdmin(); });
+  document.querySelectorAll('[data-speed]').forEach(b => b.onclick = () => adm('speed', { value: +b.dataset.speed }));
+  const on = (id, f) => { const e = $('#' + id); if (e) e.onclick = f; };
+  on('ad_fm', () => adm('finishMine')); on('ad_fa', () => adm('finishAllPlayers'));
+  on('ad_res', () => { const res = { food: num('ad_r_food'), wood: num('ad_r_wood'), metal: num('ad_r_metal') }; adm('res', { pid, res }).then(r => { if (r.ok) ['food', 'wood', 'metal'].forEach(k => { const i = $('#ad_r_' + k); if (i) i.value = ''; }); }); });
+  document.querySelectorAll('[data-resall]').forEach(b => b.onclick = () => { const v = +b.dataset.resall; adm('res', { pid, res: { food: v, wood: v, metal: v } }); });
+  document.querySelectorAll('[data-prod]').forEach(b => b.onclick = () => adm('produce', { pid, hours: +b.dataset.prod }));
+  on('ad_tr', () => { const troops = {}; C.TROOP_ORDER.forEach(k => troops[k] = num('ad_t_' + k)); adm('troops', { pid, troops }).then(r => { if (r.ok) C.TROOP_ORDER.forEach(k => { const i = $('#ad_t_' + k); if (i) i.value = ''; }); }); });
+  document.querySelectorAll('[data-fin]').forEach(b => b.onclick = () => adm('finish', { pid, what: b.dataset.fin || null }));
+  on('ad_lvl', () => adm('setLevel', { pid, key: $('#ad_bk').value, level: num('ad_bl') }));
+  on('ad_maxall', async () => { if (!confirm('Tüm binalar azami seviyeye çıkarılsın mı?')) return; for (const k of C.BUILD_ORDER) await adm('setLevel', { pid, key: k, level: C.MAX_LEVEL }); });
+  document.querySelectorAll('[data-sh]').forEach(b => b.onclick = () => adm('shield', { pid, minutes: +b.dataset.sh }));
+  on('ad_tp', () => adm('teleport', { pid, x: num('ad_x'), y: num('ad_y') }));
+  on('ad_wave', () => adm('wave', { pid }));
+  on('ad_rp', () => { if (confirm('Bu oyuncunun tüm ilerlemesi silinsin mi?')) adm('resetPlayer', { pid }); });
+  on('ad_del', () => { if (confirm('Bu oyuncu tamamen silinsin mi? Geri alınamaz.')) adm('deletePlayer', { pid }); });
+  on('ad_bc', () => { const v = $('#ad_msg').value.trim(); if (!v) return; adm('broadcast', { text: v }).then(r => { if (r.ok) $('#ad_msg').value = ''; }); });
+  on('ad_reset', () => { if (prompt('Tüm oyun sıfırlanacak. Onaylamak için SIFIRLA yazın:') === 'SIFIRLA') adm('resetGame', { confirm: 'SIFIRLA' }); });
+  on('ad_reset2', () => { if (prompt('Oyun sıfırlanacak VE diğer oyuncular silinecek. Onay için SIFIRLA yazın:') === 'SIFIRLA') adm('resetGame', { confirm: 'SIFIRLA', deletePlayers: true }); });
+};
 
 // main'in sohbet dışı görünümü
 const origRender = render;
